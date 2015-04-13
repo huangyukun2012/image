@@ -3,10 +3,12 @@ package  main
 import(
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"strconv"
 	"time"
 	"net/http"
 	"wharf/util"
@@ -84,10 +86,6 @@ func (t *TransportUnit)Init( input ImageTransportHead){
 func (i *TransportUnit)GetDataFromHttpReqest( r *http.Request) error{
 	defer r.Body.Close()
 
-	if *flagDebug{
-		util.PrintErr("content length is", r.ContentLength)	
-	}
-
 	content := make([]byte, r.ContentLength+1)
 
 	var addition  int
@@ -106,9 +104,6 @@ func (i *TransportUnit)GetDataFromHttpReqest( r *http.Request) error{
 	}
 	
 	content = content[:readlen]	
-	if *flagDebug{
-		util.PrintErr("read", readlen , "in total")
-	}
 	jsonerr:= json.Unmarshal(content, i)
 	return jsonerr
 }
@@ -196,17 +191,26 @@ func TransportImageHandler( w http.ResponseWriter, r *http.Request){
 	endOfFile = false 
 	var numOfBlock int
 	imt.DataIndex=-1
+	thisFileInfo, staterr := f.Stat()
+	if staterr!=nil{
+		http.Error(w, "server error",500)	
+		return 
+	}
+	fileSizeByBlock := thisFileInfo.Size()/BLOCKSIZE
+
+
+	head := "reading file:"
+	fmt.Fprintf(os.Stdout,"%s",head)
 	for ; !endOfFile ;{//every block
 		buf := make([]byte,BLOCKSIZE)
 		n , readerr := f.Read(buf)
 		if n<BLOCKSIZE || readerr == io.EOF{
 			endOfFile=true
 			imt.DataIndex=-1
+			util.Progress(int64(fileSizeByBlock),fileSizeByBlock)
 		}else{
-			if *flagDebug {
-				util.PrintErr("read file len:", n)
-			}
 			imt.DataIndex++
+			util.Progress(int64(imt.DataIndex),fileSizeByBlock)
 		}
 		numOfBlock++
 		var postData TransportUnit
@@ -218,9 +222,6 @@ func TransportImageHandler( w http.ResponseWriter, r *http.Request){
 			util.PrintErr("In TransportImageHandler:we can not marshal the post data")	
 			response.Set(util.SERVER_ERROR, jsonerr.Error())
 			return 
-		}
-		if *flagDebug {
-			util.PrintErr("json marshal  len:", len(string(postBytes)))
 		}
 		res , reserr := http.Post(url, util.POSTTYPE, strings.NewReader(string(postBytes)))
 		if reserr!= nil{//post failed
@@ -332,7 +333,8 @@ func SaveAndPostHandler( w http.ResponseWriter, r *http.Request){
 		return 
 	} 
 	if (*flagDebug){
-		util.PrintErr("one block is saved.")
+		util.StringFlush(strconv.Itoa(imt.Meta.DataIndex))
+		util.StringFlush(" blocks are saved.")
 	}
 	defer f.Close()
 	//above: save end.

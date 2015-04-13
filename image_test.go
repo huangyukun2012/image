@@ -1,12 +1,14 @@
 package main 
 
 import (
-	"strings"
-	"net/http"
+	/* "strings" */
+	/* "net/http" */
 	"fmt"
+	"time"
+	"os"
 	/* "encoding/json" */
 	"testing"
-	"wharf/util"
+	/* "wharf/util" */
 )
 
 /*
@@ -69,7 +71,7 @@ func  Test_LoadImage(t *testing.T){
 }
 */
 func  Test_RmImage(t *testing.T){
-
+/*
 	data := `/tmp/ubuntu.img`
 	var url string
 	url = `http://`+"192.168.122.1" + `:` +`7000`+`/rm_tarfile`
@@ -83,4 +85,14 @@ func  Test_RmImage(t *testing.T){
 		fmt.Println(string(content))	
 	}
 	return 
+	*/
+	fmt.Fprintf(os.Stdout,"\b\b\b\b%s%%","abc")
+	os.Stdout.Sync()
+	time.Sleep(time.Second)
+	fmt.Fprintf(os.Stdout,"\b\b\b\b%s%%","123")
+	Progress(1,100)
+	time.Sleep(time.Second)
+	time.Sleep(time.Second)
+	Progress(2,100)
 }
+
