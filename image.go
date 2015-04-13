@@ -162,12 +162,15 @@ func TransportImageHandler( w http.ResponseWriter, r *http.Request){
 	var imt ImageTransportHead
 	err := imt.GetDataFromHttpReqest( r )
 	if err!=nil{
+		http.Error(w, "bad request",400)
 		response.Set(util.SERVER_ERROR, err.Error())	
+		io.WriteString(w, response.String())
 		return 
 	}
 
 	if len(imt.Nodes)<1{
-		response.Set(util.SERVER_ERROR,"no destination.")
+		response.Set(util.OK,"no destination.")
+		io.WriteString(w, response.String())
 		return 
 	}
 
@@ -278,6 +281,7 @@ func SaveAndPostHandler( w http.ResponseWriter, r *http.Request){
 
 	if err!=nil{
 		util.PrintErr(err)
+		http.Error(w,"bad request", 400)
 		response.Set(util.SERVER_ERROR, err.Error())	
 		io.WriteString(w, response.String())
 		sendAckToServer(false,imt.Meta.Server )
@@ -288,6 +292,7 @@ func SaveAndPostHandler( w http.ResponseWriter, r *http.Request){
 	if imt.Meta.DataIndex == 0{
 		file, err := os.Create(`/tmp/`+imt.Meta.Filename)		
 		if err != nil{
+			http.Error(w,"server error", 500)
 			util.PrintErr(err)
 			response.Set(util.SERVER_ERROR, err.Error())	
 			io.WriteString(w, response.String())
@@ -301,6 +306,7 @@ func SaveAndPostHandler( w http.ResponseWriter, r *http.Request){
 	f, openerr := os.OpenFile(`/tmp/`+imt.Meta.Filename, os.O_RDWR,0666)	
 	if openerr != nil{
 		util.PrintErr(err)
+		http.Error(w,"server error", 500)
 		response.Set(util.SERVER_ERROR, "We can not found the image in the server.")	
 		io.WriteString(w, response.String())
 		sendAckToServer(false,imt.Meta.Server )
@@ -308,6 +314,7 @@ func SaveAndPostHandler( w http.ResponseWriter, r *http.Request){
 	}
 	_, seekerr := f.Seek(0,2)
 	if seekerr != nil{
+		http.Error(w,"server error", 500)
 		util.PrintErr(err)
 		response.Set(util.SERVER_ERROR, "seek failed.")	
 		io.WriteString(w, response.String())
@@ -317,6 +324,7 @@ func SaveAndPostHandler( w http.ResponseWriter, r *http.Request){
 	
 	length, writeErr := f.Write(imt.Body)
 	if length!=len(imt.Body) || writeErr!=nil{
+		http.Error(w,"server error", 500)
 		util.PrintErr(writeErr)
 		response.Set(util.SERVER_ERROR, "write failed.")	
 		io.WriteString(w, response.String())
@@ -338,6 +346,7 @@ func SaveAndPostHandler( w http.ResponseWriter, r *http.Request){
 			}
 			resp, err := http.Post(url, util.POSTTYPE, strings.NewReader("true"))	
 			if err!=nil || !strings.HasPrefix(resp.Status, "200"){
+				http.Error(w,"server error", 500)
 				util.PrintErr("Post true to ", url, "Failed")
 				response.Set(util.SERVER_ERROR, "can not post data to server.")	
 				io.WriteString(w, response.String())
@@ -359,6 +368,7 @@ func SaveAndPostHandler( w http.ResponseWriter, r *http.Request){
 		postBytes,_ := json.Marshal(imt) 
 		resp, err := http.Post(url, util.POSTTYPE, strings.NewReader(string(postBytes)) )
 		if err != nil || !strings.HasPrefix(resp.Status, "200"){
+			http.Error(w,"server error", 500)
 			response.Set(util.SERVER_ERROR, "can not post data to server.")	
 			io.WriteString(w, response.String())
 			sendAckToServer(false,imt.Meta.Server )
@@ -401,6 +411,7 @@ func TransportAckHandler(w http.ResponseWriter,  r *http.Request){
 	content := make([]byte, 1024)
 	n, err := r.Body.Read(content)
 	if err!=nil && err != io.EOF{
+		http.Error(w, "bad request",400)
 		util.PrintErr("Invalid input to TransportAckHandler")
 		os.Exit(1)	
 	}
@@ -415,6 +426,8 @@ func TransportAckHandler(w http.ResponseWriter,  r *http.Request){
 		}
 		clock <- false 
 	}else{
+		http.Error(w, "bad request",400)
+		util.PrintErr("Invalid input to TransportAckHandler")
 		if *flagDebug{
 			util.PrintErr("Invalid input to TransportAckHandler")
 		}
@@ -458,11 +471,21 @@ func (i *Image2Tar)GetDataFromHttpReq(r *http.Request)error{
 
 }
 
+/*
+response:
+400: bad request
+500: can not build the command 'docker save'
+501: can not run 'docker save'
+*/
 func SaveImageHandler(w http.ResponseWriter,  r *http.Request){
+	if *flagDebug{
+		util.PrintErr("[ SaveImageHandler ]")
+	}
 	var response util.HttpResponse
 	var image2tar Image2Tar
 	err := image2tar.GetDataFromHttpReq(r)
 	if err!=nil{
+		http.Error(w, "invalid input:image and tar", 400)
 		response.Set(util.SERVER_ERROR, err.Error())	
 		io.WriteString(w, response.String())
 		return 
@@ -470,12 +493,14 @@ func SaveImageHandler(w http.ResponseWriter,  r *http.Request){
 	
 	cmd := exec.Command("docker", "save", "-o", `/tmp/`+image2tar.TarFileName, image2tar.Image)
 	if cmd==nil{
+		http.Error(w, `can not build the command 'docker save '`, 500)
 		response.Set(util.SERVER_ERROR, `Error: can not create command "docker save"`)	
 		io.WriteString(w, response.String())
 		return 
 	}
 	runerr := cmd.Run()
 	if runerr != nil{
+		http.Error(w, `can not run the command 'docker save '`, 500)
 		response.Set(util.SERVER_ERROR, `Error: can not run command "docker save"`)	
 		io.WriteString(w, response.String())
 		return 
@@ -485,12 +510,21 @@ func SaveImageHandler(w http.ResponseWriter,  r *http.Request){
 	return 
 }
 
+/*
+response:
+400: bad request
+500: server error
+*/
 func LoadImageHandler(w http.ResponseWriter,  r *http.Request){
+	if *flagDebug{
+		util.PrintErr("[ LoadImageHandler ]")	
+	}
 	var response util.HttpResponse
 	var imageFullName string
 	contents := make([]byte, 200)
 	n, err := r.Body.Read(contents)
 	if err != nil && err!=io.EOF{
+		http.Error(w, "bad request", 400)
 		response.Set(util.SERVER_ERROR, `Error: can not read imageFullName content from http.Request`)	
 		io.WriteString(w, response.String())
 		return 
@@ -499,12 +533,15 @@ func LoadImageHandler(w http.ResponseWriter,  r *http.Request){
 
 	cmd := exec.Command("docker", "load", "-i", imageFullName)
 	if cmd==nil{
+		http.Error(w, "server error", 500)
+		response.Set(util.SERVER_ERROR, `Error: can not read imageFullName content from http.Request`)	
 		response.Set(util.SERVER_ERROR, `Error: can not create command "docker load"`)	
 		io.WriteString(w, response.String())
 		return 
 	}
 	runerr := cmd.Run()
 	if runerr != nil{
+		http.Error(w, "server error", 500)
 		response.Set(util.SERVER_ERROR, `Error: can not run command "docker load"`)	
 		io.WriteString(w, response.String())
 		return 
@@ -514,12 +551,21 @@ func LoadImageHandler(w http.ResponseWriter,  r *http.Request){
 	return 
 }
 
+/*
+response:
+400: bad request
+500: server error
+*/
 func RmTarfileHandler(w http.ResponseWriter,  r *http.Request){
+	if *flagDebug{
+		util.PrintErr("[ RmTarfileHandler ]")	
+	}
 	var response util.HttpResponse
 	var imageFullName string
 	contents := make([]byte, 200)
 	n, err := r.Body.Read(contents)
 	if err != nil && err!=io.EOF{
+		http.Error(w, "bad request", 400)
 		response.Set(util.SERVER_ERROR, `Error: can not read imageFullName content from http.Request`)	
 		io.WriteString(w, response.String())
 		return 
@@ -527,6 +573,7 @@ func RmTarfileHandler(w http.ResponseWriter,  r *http.Request){
 	imageFullName = `/tmp/`+string(contents[:n])
 	rmerr := os.Remove(imageFullName)	
 	if rmerr!=nil{
+		http.Error(w, "bad request", 400)
 		response.Set(util.SERVER_ERROR, "Can not remove "+imageFullName)	
 	}else{
 		response.Set(util.OK,imageFullName+ " has been removed.")	

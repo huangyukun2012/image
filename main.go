@@ -3,6 +3,7 @@ package  main
 import(
 	"flag"
 	"log"
+	"fmt"
 	"wharf/util"
 	"net/http"
 )
@@ -29,7 +30,9 @@ func main(){
 	http.HandleFunc("/save_image", SaveImageHandler)
 	http.HandleFunc("/load_image",LoadImageHandler)
 	http.HandleFunc("/rm_tarfile",RmTarfileHandler)
-
+	if *flagDebug{
+		fmt.Println("Listening for image...")
+	}
 	errhttp := http.ListenAndServe(":"+imageConfig.Port, nil)
 	if errhttp != nil{
 		log.Fatal("InitServer: ListenAndServe ", errhttp)	
