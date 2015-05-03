@@ -43,6 +43,7 @@ type ImageTransportHead struct{
 	Net string	`192.168`
 	Filename string	
 	DataIndex int
+	BlockNum int
 	Nodes []string `1.1`
 	Server	string `ip`
 }
@@ -50,10 +51,11 @@ type ImageTransportHead struct{
 func (i *ImageTransportHead)GetDataFromHttpReqest( r *http.Request) error{
 	content := make([]byte, BLOCKSIZE)
 	n, err := r.Body.Read(content)	
-	
+
 	if err == io.EOF{
 		if *flagDebug{
-			util.PrintErr("encount io.EOF when reading r.Body.")
+			util.PrintErr("Transport Head:")
+			util.PrintErr(string(content[:n]))
 		}
 	}else if err != nil{
 		util.PrintErr("Can not read ImageTransportHead from http request.")
@@ -84,13 +86,13 @@ func (t *TransportUnit)Init( input ImageTransportHead){
 }
 
 func (i *TransportUnit)GetDataFromHttpReqest( r *http.Request) error{
-	defer r.Body.Close()
 
 	content := make([]byte, r.ContentLength+1)
 
 	var addition  int
 	var readlen int
 	addition, err := r.Body.Read(content)	
+	defer r.Body.Close()
 	readlen += addition
 
 	for ;err!=io.EOF;{
@@ -125,7 +127,6 @@ func (itr *ImageTransportResponse)String()string{
 }
 
 
-var clock chan bool	
 /*
 function: transport the "fileName" to the Ip sets.
 	cut the file into different blocks(sizeof 512K).
@@ -150,9 +151,14 @@ output:
 	the last node send ack to the first node---- success: status 200-OK
 											---- fail: status  Server error, imageFailNodes{ ip, errinfo}
 timeout: ( size/bind + blockSize/bind * nodeNum ) *2  ---fail: status 408-timeout
-
+Be carefull: if the file is one block size, we will read two times!!!
 */
 func TransportImageHandler( w http.ResponseWriter, r *http.Request){
+	defer r.Body.Close()
+	clockClosed=false
+	if *flagDebug {
+		util.PrintErr("[ TransportImageHandler ]")
+	}
 	var response ImageTransportResponse
 	var imt ImageTransportHead
 	err := imt.GetDataFromHttpReqest( r )
@@ -187,32 +193,30 @@ func TransportImageHandler( w http.ResponseWriter, r *http.Request){
 	}
 
 	/* fileReader := bufio.NewReader(f) */
-	var endOfFile bool
-	endOfFile = false 
-	var numOfBlock int
-	imt.DataIndex=-1
 	thisFileInfo, staterr := f.Stat()
 	if staterr!=nil{
 		http.Error(w, "server error",500)	
 		return 
 	}
+	//be carefull: if the file size is 10M, then it will have 10 block, but it will send 11 times.
 	fileSizeByBlock := thisFileInfo.Size()/BLOCKSIZE
+	if thisFileInfo.Size()%BLOCKSIZE>0{
+		fileSizeByBlock++
+	}
+	imt.BlockNum=int(fileSizeByBlock)
 
+	head := "reading file:(data_index/fileSizeByBlock)"
+	if *flagDebug{
+		fmt.Fprintf(os.Stdout, "%s", head)
+	}
+	imt.DataIndex=0
 
-	head := "reading file:"
-	fmt.Fprintf(os.Stdout,"%s",head)
-	for ; !endOfFile ;{//every block
+	for ; imt.DataIndex < imt.BlockNum && Process==true;{//every block
 		buf := make([]byte,BLOCKSIZE)
-		n , readerr := f.Read(buf)
-		if n<BLOCKSIZE || readerr == io.EOF{
-			endOfFile=true
-			imt.DataIndex=-1
-			util.Progress(int64(fileSizeByBlock),fileSizeByBlock)
-		}else{
-			imt.DataIndex++
+		n , _ := f.Read(buf)
+		if *flagDebug{
 			util.Progress(int64(imt.DataIndex),fileSizeByBlock)
 		}
-		numOfBlock++
 		var postData TransportUnit
 		postData.Init(imt)
 		postData.Body = buf[:n]
@@ -223,6 +227,32 @@ func TransportImageHandler( w http.ResponseWriter, r *http.Request){
 			response.Set(util.SERVER_ERROR, jsonerr.Error())
 			return 
 		}
+		if imt.DataIndex>=2{
+			nextnode := destination
+			endpoint := nextnode + `:` + imageConfig.Port 
+			path := `/get_postState`
+			url :=  `http://`+endpoint+path
+
+			indexstr := strconv.Itoa(imt.DataIndex-2)
+			resp, err := http.Post(url, util.POSTTYPE, strings.NewReader(indexstr))
+			contents := make([]byte, 10)
+			if err == nil && strings.HasPrefix(resp.Status, "200") {
+				defer resp.Body.Close()
+				n , _:= resp.Body.Read(contents)	
+				if string(contents[:n])=="true"{
+					//continue
+					if *flagDebug && DebugLevel>=2{
+						util.PrintErr("the next node has posted the", indexstr, "data")	
+					}
+				}
+			}else{
+				if *flagDebug && DebugLevel>=2{
+					util.PrintErr("the next node failed to post the", indexstr, "data")	
+				}
+				break//do not send any more
+			}
+		}
+
 		res , reserr := http.Post(url, util.POSTTYPE, strings.NewReader(string(postBytes)))
 		if reserr!= nil{//post failed
 			util.PrintErr(reserr.Error())	
@@ -231,16 +261,25 @@ func TransportImageHandler( w http.ResponseWriter, r *http.Request){
 		}
 		if strings.HasPrefix(res.Status, "200"){//post OK
 			//do nothing
+			res.Body.Close()
 		}else{//post failed
 			util.PrintErr(res.Status)	
 			response.Set(util.SERVER_ERROR, res.Status)
 			return 
 		}
-
+		imt.DataIndex++
 	}
+
+	if Process==false{
+		http.Error(w,"server err",500 )	
+		response.Set(util.SERVER_ERROR, "The send process is not complished")
+		io.WriteString(w, response.String())
+		return 
+	}
+
 	//wait for the answer from the last node
 	bindwidth := 10
-	duration := time.Duration( (1.0*numOfBlock/bindwidth+ (len(imt.Nodes)+1)/bindwidth )*5)*time.Second	
+	duration := time.Duration( (1.0*imt.BlockNum/bindwidth+ (len(imt.Nodes)+1)/bindwidth )*5)*time.Second	
 	util.PrintErr( "ALL blocks is sent. Waiting ack for", duration, "second ...")	
 	isTimeOut := util.Timer(duration,&clock)
 	if isTimeOut{
@@ -251,7 +290,6 @@ func TransportImageHandler( w http.ResponseWriter, r *http.Request){
 		if *flagDebug{
 			util.PrintErr("Transportation for the file is ok.")
 		}
-	
 	}
 	io.WriteString(w, response.String())				
 	return 
@@ -276,71 +314,102 @@ function:
 			send ac to server.
 */
 func SaveAndPostHandler( w http.ResponseWriter, r *http.Request){
-	var response ImageTransportResponse
 	var imt TransportUnit 
 	err := imt.GetDataFromHttpReqest( r )
 
 	if err!=nil{
 		util.PrintErr(err)
 		http.Error(w,"bad request", 400)
-		response.Set(util.SERVER_ERROR, err.Error())	
-		io.WriteString(w, response.String())
 		sendAckToServer(false,imt.Meta.Server )
 		return 
 	}
-	
-	path :=`save_post` 
+	index := imt.Meta.DataIndex
+	chs_save[index]=make(chan bool)
+	chs_post[index]=make(chan bool)
+
+
+	if imt.Meta.DataIndex == 0{
+		go  saveBlock(imt,  chs_save[index])
+		go  postBlock(imt,  chs_post[index])
+	}else{
+		go func(){//save
+			value_save := <- chs_save[index-1]//wait
+			if value_save==true {
+				saveBlock(imt,  chs_save[index])	
+			}else{
+				util.PrintErr("Save", index-1, "failed.")
+				sendAckToServer(false, imt.Meta.Server)	
+			}
+		}()
+		go func(){//post
+			indexstr := strconv.Itoa(index-2)
+			if index==0 || index==1 || len(imt.Meta.Nodes)==0 {//the first two data index, or the  last node 
+				postBlock(imt,chs_post[index] )
+			}else{
+				nextnode := imt.Meta.Net + `.` + imt.Meta.Nodes[0]
+				endpoint := nextnode + `:` + imageConfig.Port 
+				path := `/get_postState`
+				url :=  `http://`+endpoint+path
+
+				resp, err := http.Post(url, util.POSTTYPE, strings.NewReader(indexstr))
+				contents := make([]byte, 10)
+				if err == nil && strings.HasPrefix(resp.Status, "200") {
+					defer resp.Body.Close()
+					n , _:= resp.Body.Read(contents)	
+					if string(contents[:n])=="true"{
+						err := postBlock(imt,chs_post[index] )
+						if err!=nil{
+							sendAckToServer(false, imt.Meta.Server)	
+						}
+					}
+				}else{
+					sendAckToServer(false, imt.Meta.Server)	
+				}
+			}
+		}()
+	}
+	return 
+}
+
+func saveBlock(imt TransportUnit ,ch chan bool){
+
 	if imt.Meta.DataIndex == 0{
 		file, err := os.Create(`/tmp/`+imt.Meta.Filename)		
 		if err != nil{
-			http.Error(w,"server error", 500)
 			util.PrintErr(err)
-			response.Set(util.SERVER_ERROR, err.Error())	
-			io.WriteString(w, response.String())
 			sendAckToServer(false,imt.Meta.Server )
+			ch <- false 
 			return 
 		}
 		file.Close()
 	}
 
-	
 	f, openerr := os.OpenFile(`/tmp/`+imt.Meta.Filename, os.O_RDWR,0666)	
 	if openerr != nil{
-		util.PrintErr(err)
-		http.Error(w,"server error", 500)
-		response.Set(util.SERVER_ERROR, "We can not found the image in the server.")	
-		io.WriteString(w, response.String())
+		util.PrintErr(openerr)
 		sendAckToServer(false,imt.Meta.Server )
+		ch <- false 
 		return 
 	}
 	_, seekerr := f.Seek(0,2)
 	if seekerr != nil{
-		http.Error(w,"server error", 500)
-		util.PrintErr(err)
-		response.Set(util.SERVER_ERROR, "seek failed.")	
-		io.WriteString(w, response.String())
+		util.PrintErr(seekerr)
 		sendAckToServer(false,imt.Meta.Server )
+		ch <- false 
 		return 
 	}
 	
 	length, writeErr := f.Write(imt.Body)
 	if length!=len(imt.Body) || writeErr!=nil{
-		http.Error(w,"server error", 500)
 		util.PrintErr(writeErr)
-		response.Set(util.SERVER_ERROR, "write failed.")	
-		io.WriteString(w, response.String())
 		sendAckToServer(false,imt.Meta.Server )
+		ch <- false 
 		return 
 	} 
-	if (*flagDebug){
-		util.StringFlush(strconv.Itoa(imt.Meta.DataIndex))
-		util.StringFlush(" blocks are saved.")
-	}
-	defer f.Close()
-	//above: save end.
 
-	if len(imt.Meta.Nodes)<1{//the last node
-		if imt.Meta.DataIndex == -1{//the last block
+	//if the block is the last one, send ack to server
+	if imt.Meta.DataIndex == imt.Meta.BlockNum-1{
+		if len(imt.Meta.Nodes)==0 {
 			endpoint := imt.Meta.Server + ":" + imageConfig.Port
 			url := `http://` + endpoint + `/transport_ack`
 			if (*flagDebug){
@@ -348,45 +417,56 @@ func SaveAndPostHandler( w http.ResponseWriter, r *http.Request){
 			}
 			resp, err := http.Post(url, util.POSTTYPE, strings.NewReader("true"))	
 			if err!=nil || !strings.HasPrefix(resp.Status, "200"){
-				http.Error(w,"server error", 500)
 				util.PrintErr("Post true to ", url, "Failed")
-				response.Set(util.SERVER_ERROR, "can not post data to server.")	
-				io.WriteString(w, response.String())
 				sendAckToServer(false,imt.Meta.Server )
-				return 
 			}
-		   response.Set(util.OK,"this file is transported end.")	
-		}else{
-		   response.Set(util.OK,"this block is transported end.")	
-			io.WriteString(w, response.String())
-		   return 
-		}	
-	}else{//not the last node
+		}
+	}
+
+	if (*flagDebug){
+		if imt.Meta.DataIndex==0{
+			util.PrintErr("Saving block:")
+		}
+		util.Progress(int64(imt.Meta.DataIndex+1), int64(imt.Meta.BlockNum))
+	}
+	ch <- true
+	defer f.Close()
+	return 
+}
+
+/*
+function:post block to next node, and set ch_post true
+input : chs_pre_post[index-2]
+	if true:post
+	else  : blocked
+*/
+func postBlock(imt TransportUnit , ch_post chan bool)error{
+
+	path :=`save_post` 
+
+	if len(imt.Meta.Nodes)>=1{//not the last node
 		nextnode := imt.Meta.Net + `.` + imt.Meta.Nodes[0]
 		endpoint := nextnode + `:` + imageConfig.Port 
 		url := `http://` + endpoint + `/`+ path
 
 		imt.Meta.Nodes = imt.Meta.Nodes[1:]
 		postBytes,_ := json.Marshal(imt) 
-		resp, err := http.Post(url, util.POSTTYPE, strings.NewReader(string(postBytes)) )
+
+		resp,err := http.Post(url, util.POSTTYPE, strings.NewReader(string(postBytes)) )
 		if err != nil || !strings.HasPrefix(resp.Status, "200"){
-			http.Error(w,"server error", 500)
-			response.Set(util.SERVER_ERROR, "can not post data to server.")	
-			io.WriteString(w, response.String())
+			ch_post <- false
 			sendAckToServer(false,imt.Meta.Server )
-			return 
+			return errors.New("post data failed.")
+		}else{
+			defer resp.Body.Close()
 		}
-		response.Set(util.OK, "This block is posted to next node.")
+		if *flagDebug && DebugLevel>=2 {
+			util.PrintErr(imt.Meta.DataIndex, "  data is posted.")
+		}
 	}
-	if *flagDebug{
-		util.PrintErr("The data is posted.")
-	}
-	io.WriteString(w, response.String())				
-	return 
-
+	ch_post <- true
+	return nil
 }
-
-
 /*
 function:
 	post diff ack to server
@@ -409,6 +489,10 @@ func sendAckToServer(ack bool, serverIp string)error{
 function:give content to chanel, according to the post data to TransportImageHandler
 */
 func TransportAckHandler(w http.ResponseWriter,  r *http.Request){
+	if clockClosed {
+		//do nothing
+		return 	
+	}
 	//only true and false is valid for the post data.	
 	content := make([]byte, 1024)
 	n, err := r.Body.Read(content)
@@ -419,15 +503,18 @@ func TransportAckHandler(w http.ResponseWriter,  r *http.Request){
 	}
 	if n==4{//true
 		clock <- true
+		Process = true
 		if *flagDebug{
 			util.PrintErr("The ack info is true")
 		}
 	}else if n==5{//false
+		clock <- false 
+		Process = false 
 		if *flagDebug{
 			util.PrintErr("The ack info is false")
 		}
-		clock <- false 
 	}else{
+		Process = false 
 		http.Error(w, "bad request",400)
 		util.PrintErr("Invalid input to TransportAckHandler")
 		if *flagDebug{
@@ -435,9 +522,7 @@ func TransportAckHandler(w http.ResponseWriter,  r *http.Request){
 		}
 		os.Exit(1)	
 	}
-	if *flagDebug{
-		util.PrintErr("ack ended.")
-	}
+	clockClosed = true
 	return 
 }
 
@@ -581,5 +666,38 @@ func RmTarfileHandler(w http.ResponseWriter,  r *http.Request){
 		response.Set(util.OK,imageFullName+ " has been removed.")	
 	}
 	io.WriteString(w, response.String())
+	return 
+}
+
+/*
+response:
+400: bad request
+500: server error
+*/
+func GetPostStateHandler(w http.ResponseWriter,  r *http.Request){
+	if *flagDebug{
+		//util.PrintErr("[", r.RemoteAddr,"GetPostStateHandler ]")	
+	}
+	contents := make([]byte, 200)
+	n, err := r.Body.Read(contents)
+	defer r.Body.Close()
+	if err != nil && err!=io.EOF{
+		http.Error(w, "bad request", 400)
+		return 
+	}else{
+		postindex, _ := strconv.Atoi(string(contents[:n]))
+		var ans string
+		if postindex<0{
+			ans="true"
+		}else{
+			value := <- chs_post[postindex]
+			if value{
+				ans="true"	
+			}else{
+				ans="false"	
+			}
+		}
+		io.WriteString(w, ans)
+	}
 	return 
 }
